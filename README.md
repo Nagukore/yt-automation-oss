@@ -69,6 +69,36 @@ flowchart TD
 
 ---
 
+## Design philosophy: a workflow, not an agent
+
+This project uses **LangGraph** (an agent framework) — but deliberately as a **fixed workflow**,
+not an autonomous agent. Every run takes the same path; no LLM ever decides *what to do next*.
+
+| | This project (workflow) | An agent |
+|---|---|---|
+| Control flow | Fixed by code (`research → script → … → video`) | Chosen by the LLM at runtime |
+| Tool use | Called at predetermined steps | Picked dynamically from a toolbox |
+| Failure mode | Predictable, resumable, inspectable | Can wander, loop, burn tokens |
+| Cost per run | Known upper bound | Open-ended |
+
+**Why:** this pipeline runs unattended on a schedule and publishes to a real channel. A 06:00 UTC
+run should be boringly predictable — deterministic flow means a failed run points at exactly one
+stage, and a passing run costs exactly the same as yesterday's.
+
+It still borrows the *useful* parts of agentic design, without giving up control:
+
+- **LLM-as-judge** — one model evaluates another's drafts and picks the winner (evaluator
+  pattern), but its verdict selects content, never changes the graph's path.
+- **Environmental feedback** — real engagement data reweights future theme selection, but by
+  arithmetic, not by an LLM reasoning about it.
+- **Model fallback chains + retries** — resilience at every LLM call, with bounded attempts.
+
+The natural place to add true agency later: a bounded self-correction loop at the script stage
+(judge scores all drafts low → regenerate with the critique injected → re-judge, capped at 1–2
+iterations). LangGraph's conditional edges support this directly.
+
+---
+
 ## Architecture
 
 Two ways to run the same pipeline:
@@ -123,6 +153,12 @@ Everything in the "Free default" column runs **without paying anyone**. You only
 ---
 
 ## Setup
+
+> 📖 **New here? Follow the [Complete Setup Guide](docs/SETUP.md)** — a step-by-step
+> walkthrough from zero to a self-running channel (~30 min, $0), with a verification
+> check after every part and a troubleshooting table.
+
+The short version:
 
 ### CI mode (recommended)
 
@@ -235,8 +271,9 @@ Every generated description discloses that narration and visuals are AI-generate
 You are responsible for complying with the YouTube Terms of Service, content policies, and the
 terms of every model/API you enable. Keep the human approval step on. See `docs/DEPLOYMENT.md`.
 
----
-
 ## License
 
-MIT — see [LICENSE](LICENSE). TTS default `edge-tts` is a GPL-3.0 dependency installed separately by users.
+Copyright (c) 2026 Nagesh. Released under the **MIT License** — see [LICENSE](LICENSE).
+
+Note: the default TTS provider `edge-tts` is a GPL-3.0 dependency that users install
+separately via pip; it is not bundled in this repository.

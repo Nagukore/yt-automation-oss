@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "AI-powered YouTube automation system (human-in-the-loop)"
 requires-python = ">=3.12"
 readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Nagesh" }]
 
 dependencies = [
     # web

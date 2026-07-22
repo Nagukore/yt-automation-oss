@@ -1,5 +1,9 @@
 # Deploy on GitHub Actions (free, no credit card, no server)
 
+> ⚠️ **Superseded:** the current step-by-step guide is [SETUP.md](SETUP.md) — it covers the
+> newer dev-humor workflow, the weekly stats feedback loop and the `YOUTUBE_API_KEY` secret,
+> which this page predates. Kept for its extra background detail.
+
 Runs the whole pipeline on a schedule inside a GitHub runner:
 
 ```
