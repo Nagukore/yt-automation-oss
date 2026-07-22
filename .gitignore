@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Env & secrets
+.env
+secrets/
+*.pem
+
+# Media output & models
+media_output/
+models/
+*.onnx
+*.wav
+*.mp3
+*.mp4
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Runtime artifacts (never commit these — logs/db can contain personal data)
+logs/
+*.db
+*.sqlite3
