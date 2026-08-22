@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from app.core.config import settings
@@ -40,15 +41,30 @@ class FasterWhisperProvider:
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         model = _load()
-        segments, _ = model.transcribe(str(audio_path), beam_size=5, word_timestamps=False)
+        # Word timestamps cost little on top of the decode and are what the
+        # animated captions need; without them we could only interpolate.
+        segments, _ = model.transcribe(str(audio_path), beam_size=5, word_timestamps=True)
         lines: list[str] = []
+        words: list[dict] = []
         for i, seg in enumerate(segments, start=1):
             lines.append(str(i))
             lines.append(f"{_fmt_ts(seg.start)} --> {_fmt_ts(seg.end)}")
             lines.append(seg.text.strip())
             lines.append("")
+            for w in getattr(seg, "words", None) or []:
+                text = (w.word or "").strip()
+                if text:
+                    words.append({"s": float(w.start), "e": float(w.end), "t": text})
         dest.write_text("\n".join(lines), encoding="utf-8")
-        logger.debug("subtitles written {}", dest.name)
+
+        if words:
+            # Same sidecar contract as edge-tts, beside the *audio* file, which is
+            # where the caption builder looks.
+            audio = Path(audio_path)
+            audio.with_name(audio.stem + ".words.json").write_text(
+                json.dumps(words), encoding="utf-8"
+            )
+        logger.debug("subtitles written {} ({} words)", dest.name, len(words))
         return dest
 
 

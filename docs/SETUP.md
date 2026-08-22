@@ -109,7 +109,10 @@ channel's Shorts shelf automatically.
 
 ## Part 5 — GitHub secrets (connects everything)
 
-Repo → **Settings → Secrets and variables → Actions → New repository secret**, four times:
+Repo → **Settings → Secrets and variables → Actions → New repository secret**.
+
+The first four are required for the daily Shorts. The last two unlock the weekly
+long-form stream and tracing — skip them and everything else still runs:
 
 | Secret name | Value |
 |---|---|
@@ -117,10 +120,12 @@ Repo → **Settings → Secrets and variables → Actions → New repository sec
 | `YOUTUBE_CLIENT_SECRET_JSON` | The **entire contents** of `secrets/youtube_client_secret.json` (open it, copy all, paste) |
 | `YOUTUBE_TOKEN_JSON` | The **entire contents** of `secrets/youtube_token.json` |
 | `YOUTUBE_API_KEY` | The API key from Part 3c |
+| `GEMINI_API_KEY` | *Long-form only.* Free key from [aistudio.google.com](https://aistudio.google.com/apikey). The weekly long-form workflow drives Gemini; the Shorts stay on OpenRouter |
+| `LANGSMITH_API_KEY` | *Optional.* Enables run tracing and per-video cost reporting. Left unset, tracing quietly no-ops |
 
 > Paste raw JSON exactly as-is — no quotes added, nothing removed.
 
-✅ **Check:** four secrets listed on the Actions secrets page.
+✅ **Check:** at least the four required secrets listed on the Actions secrets page.
 
 ---
 
@@ -140,9 +145,16 @@ From now on everything is automatic:
 
 | Workflow | Schedule (UTC) | Does |
 |---|---|---|
-| Daily AI News Video | 06:00 daily | AI news short → upload private |
-| Daily Dev Humor Video | 15:00 daily | Dev humor short → upload private |
-| Weekly Performance Stats | Monday 04:00 | Fetch stats → commit `state/performance_report.md` |
+| Daily AI News Video | 21:00 daily | AI news short → upload private |
+| Daily Dev Humor Video | 23:00 daily | Dev humor short → upload private |
+| Daily Code Heartbreak Video | 00:30 daily | Sad coding-quote short → upload private |
+| Weekly Long-Form Video | Wed & Sat 17:50 | Long-form video (Gemini) → upload private |
+| Weekly Performance Stats | Monday 03:50 | Fetch stats → commit `state/performance_report.md` |
+
+These UTC times are deliberately odd: they are set so that uploads land in US
+prime time, and staggered so two streams never render in the same runner slot.
+Retime them by editing the `cron:` line in the matching
+`.github/workflows/*.yml` — the value is **always UTC**, never your local time.
 
 ---
 

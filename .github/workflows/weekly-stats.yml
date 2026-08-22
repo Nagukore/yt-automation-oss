@@ -10,9 +10,10 @@ name: Weekly Performance Stats
 
 on:
   schedule:
-    # Monday 04:00 UTC, before the day's uploads, so the week starts with
+    # Monday 03:50 UTC, before the day's uploads, so the week starts with
     # fresh weights.
-    - cron: "0 4 * * 1"
+    # The :50 buys back the queue delay GitHub adds on the hour — see daily-video.yml.
+    - cron: "50 3 * * 1"
   workflow_dispatch:
 
 concurrency:
@@ -21,6 +22,7 @@ concurrency:
 
 permissions:
   contents: write        # commit state/performance.json + report back
+  issues: write          # file a failure issue (see "Open an issue on failure")
 
 jobs:
   collect:
@@ -40,6 +42,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
+      # View/like counts are public and need only the API key, but the country
+      # breakdown is owner-only data from the YouTube Analytics API, which needs
+      # OAuth. If the token predates the yt-analytics.readonly scope the run still
+      # succeeds — it just logs how to re-authorize and skips geography.
+      - name: Restore YouTube OAuth token
+        env:
+          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
+        run: |
+          mkdir -p secrets
+          printf '%s' "$YOUTUBE_TOKEN_JSON" > secrets/youtube_token.json
+          python -c "import json;json.load(open('secrets/youtube_token.json'));print('token ok')"
+
       - name: Collect stats
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
@@ -58,4 +72,23 @@ jobs:
             git push
           else
             echo "no stat changes to record"
+          fi
+
+      # This one fails quietly in a different way: theme rotation keeps running on
+      # stale weights, so content slowly drifts off what the audience rewards without
+      # anything looking broken. See daily-video.yml.
+      - name: Open an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="${{ github.workflow }} failed"
+          body="Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Stats were not collected, so theme weights are running stale."
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty') || true
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body" || echo "could not comment on issue #$existing"
+          else
+            gh issue create --title "$title" --body "$body" || echo "could not create issue — are Issues enabled on this repo?"
           fi

@@ -18,10 +18,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -31,19 +32,48 @@ os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 from app.core.config import settings  # noqa: E402
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+# Shared with the API's /publish/authorize flow so both mint identical tokens.
+# Includes yt-analytics.readonly, which the weekly report needs for the country
+# breakdown — re-run this script and refresh YOUTUBE_TOKEN_JSON to pick it up.
+from app.services.youtube import SCOPES  # noqa: E402
+
 REDIRECT_PATH = "/api/publish/oauth/callback"
 PORT = 8000
 
 _result: dict[str, str] = {}
+_expected_state = ""
+
+# How long to wait for the human to finish the consent screen. Generous on
+# purpose: the unverified-app interstitial has a hidden "Advanced" step that is
+# easy to miss, and expiring mid-consent means starting the whole flow over.
+CALLBACK_TIMEOUT_S = 900
 
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
-        if urlparse(self.path).path != REDIRECT_PATH:
+        parsed = urlparse(self.path)
+        if parsed.path != REDIRECT_PATH:
             self.send_response(404)
             self.end_headers()
             return
+
+        params = parse_qs(parsed.query)
+        state = (params.get("state") or [""])[0]
+        if state != _expected_state:
+            # A stale callback from an earlier authorization attempt: browsers
+            # replay these from history, tab restore and address-bar prefetch,
+            # and one used to land before the real one and abort the run with
+            # MismatchingStateError. Reject it and keep listening.
+            print("  (ignoring a stale callback from an earlier attempt)")
+            self.send_response(400)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(
+                b"<h2>Stale authorization link.</h2><p>This tab is left over from "
+                b"an earlier attempt. Close it and use the newly opened tab.</p>"
+            )
+            return
+
         _result["url"] = f"http://localhost:{PORT}{self.path}"
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -69,7 +99,8 @@ def main() -> int:
     flow = Flow.from_client_secrets_file(
         str(secrets_file), scopes=SCOPES, redirect_uri=redirect_uri
     )
-    auth_url, _state = flow.authorization_url(
+    global _expected_state
+    auth_url, _expected_state = flow.authorization_url(
         access_type="offline", include_granted_scopes="true", prompt="consent"
     )
 
@@ -87,11 +118,17 @@ def main() -> int:
     webbrowser.open(auth_url)
 
     print(f"Waiting for the callback on {redirect_uri} ...")
-    server.handle_request()  # serves exactly one request, then returns
+    # Keep serving until the callback carrying OUR state arrives: favicon hits,
+    # prefetches and stale replays each consume a request, so a single
+    # handle_request() would lose the race to any of them.
+    server.timeout = 5  # makes handle_request() return so the deadline is checked
+    deadline = time.monotonic() + CALLBACK_TIMEOUT_S
+    while "url" not in _result and time.monotonic() < deadline:
+        server.handle_request()
     server.server_close()
 
     if "url" not in _result:
-        print("ERROR: no callback received.")
+        print(f"ERROR: no callback received within {CALLBACK_TIMEOUT_S}s.")
         return 1
 
     flow.fetch_token(authorization_response=_result["url"])

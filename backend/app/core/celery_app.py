@@ -7,8 +7,10 @@ from celery.schedules import crontab
 
 from app.core.config import settings
 from app.core.logging import logger, setup_logging
+from app.core.tracing import setup_tracing
 
 setup_logging()
+setup_tracing()
 
 celery = Celery(
     "yt_automation",

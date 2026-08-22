@@ -9,7 +9,11 @@ class PipelineState(TypedDict, total=False):
     project_id: int
     topic: str
     video_format: str  # "short" | "long"
-    content_type: str  # "news" (default) | "dev_humor"
+    content_type: str  # "news" (default) | "dev_humor" | "code_heartbreak"
+    # Discovery provider the topic came from ("ainews:techcrunch", "google_trends", ...).
+    # Long-form mixes AI news with general trending stories, and the description footer
+    # is chosen from this so a non-tech story isn't branded as AI news.
+    topic_source: str
 
     # generated text
     research: str

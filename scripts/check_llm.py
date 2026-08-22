@@ -61,7 +61,9 @@ def main() -> int:
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
-            "max_tokens": 10,
+            # Generous budget: reasoning-capable models spend tokens on their hidden
+            # reasoning field first; too small a cap yields content=null (false FAIL).
+            "max_tokens": 512,
         }
         started = time.perf_counter()
         try:
@@ -69,7 +71,12 @@ def main() -> int:
                 r = client.post(f"{base}/chat/completions", headers=headers, json=payload)
             elapsed = time.perf_counter() - started
             if r.status_code == 200:
-                reply = r.json()["choices"][0]["message"]["content"].strip()
+                reply = (r.json()["choices"][0]["message"]["content"] or "").strip()
+                if not reply:
+                    # Null/empty body (reasoning-only response) — the pipeline treats
+                    # this as ModelUnavailable and fails over, so flag it here too.
+                    print(f"  [NULL] {model}\n         {elapsed:.1f}s  empty content body")
+                    continue
                 print(f"  [PASS] {model}\n         {elapsed:.1f}s  reply={reply[:40]!r}")
                 working.append(model)
             elif r.status_code == 429:

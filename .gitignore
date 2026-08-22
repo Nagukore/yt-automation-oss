@@ -22,6 +22,24 @@ models/
 *.mp3
 *.mp4
 
+# ...except the music beds, which are render *inputs*, not output. The blanket
+# *.wav / *.mp3 rules above silently kept every bed out of the repo, so CI — which
+# only ever sees what is committed — rendered all three streams over silence while
+# the tracks sat on the dev machine looking installed. Same reasoning as the
+# committed caption fonts: if a render depends on an asset, the asset ships.
+!assets/music/**/*.mp3
+!assets/music/**/*.wav
+
+# Local runtime artifacts
+# The SQLite DBs are per-machine scratch state (CI recreates run.db from
+# scratch each job via _ensure_schema), and logs are a fresh file per day —
+# committing either just churns diffs and leaks local run history.
+run.db
+yt_dev.db
+*.sqlite
+*.sqlite3
+logs/
+
 # Node
 node_modules/
 frontend/dist/
@@ -32,8 +50,3 @@ frontend/.vite/
 Thumbs.db
 .idea/
 .vscode/
-
-# Runtime artifacts (never commit these — logs/db can contain personal data)
-logs/
-*.db
-*.sqlite3

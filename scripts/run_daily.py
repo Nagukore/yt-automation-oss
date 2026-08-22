@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from app.core.config import settings  # noqa: E402
 from app.core.logging import logger, setup_logging  # noqa: E402
+from app.core.tracing import setup_tracing  # noqa: E402
 from app.db import crud  # noqa: E402
 from app.db.models import Project, ProjectStatus, VideoFormat  # noqa: E402
 from app.db.session import session_scope  # noqa: E402
@@ -85,16 +86,39 @@ def save_seen(content_type: str, keys: list[str]) -> None:
     path.write_text(json.dumps({"seen": keys[-SEEN_LIMIT:]}, indent=1), encoding="utf-8")
 
 
-def pick_topics(count: int) -> list[dict]:
+def record_seen(content_type: str, title: str) -> None:
+    """Mark a topic/theme as covered — called only AFTER a successful render.
+
+    Recording on success (rather than at selection time) means an infra failure —
+    an exhausted LLM quota, a network blip — no longer burns a topic that never
+    became a video; it is simply retried next run. A genuinely broken topic can
+    recur, but trending feeds churn daily and the themed lists rotate, so it will
+    not loop forever.
+    """
+    keys = load_seen(content_type)
+    key = _seen_key(title)
+    if key not in keys:
+        keys.append(key)
+        save_seen(content_type, keys)
+        logger.info("recorded '{}' as covered", title[:60])
+
+
+def pick_topics(count: int, video_format: VideoFormat = VideoFormat.SHORT) -> list[dict]:
     """Discover fresh stories and reserve unused ones as projects.
 
     Dedupe lives in the database (Topic.used), so a persistent DATABASE_URL is what
     stops the channel re-covering the same story. With an ephemeral SQLite file the
     run still works, but every day starts with no memory of what was already posted.
     """
-    from app.services.trends import discover_topics
+    from app.services.trends import discover_mixed, discover_topics
 
-    found = discover_topics(limit=max(count * 5, 15))
+    # Long-form covers AI deep-dives AND general trending news, so it draws on both
+    # feeds interleaved. Shorts stay on the configured provider (ai_news) alone —
+    # the daily streams are the channel's AI-news core and shouldn't drift.
+    if video_format == VideoFormat.LONG:
+        found = discover_mixed(limit=max(count * 5, 15))
+    else:
+        found = discover_topics(limit=max(count * 5, 15))
     logger.info("discovered {} candidate stories", len(found))
 
     seen = load_seen("news")
@@ -129,42 +153,50 @@ def pick_topics(count: int) -> list[dict]:
 
         for topic in candidates[:count]:
             project = crud.create_project(
-                db, title=topic.title, topic_id=topic.id, video_format=VideoFormat.SHORT
+                db, title=topic.title, topic_id=topic.id, video_format=video_format
             )
             topic.used = True
             db.flush()
-            created.append({"project_id": project.id, "title": topic.title})
+            created.append(
+                {"project_id": project.id, "title": topic.title, "source": topic.source}
+            )
 
-    # Record before generating: if a render crashes we still won't retry the same
-    # story tomorrow, which is preferable to looping on one broken headline.
+    # NB: seen.json is recorded on SUCCESSFUL render (see record_seen / main),
+    # not here — an infra failure shouldn't burn a story that never got made.
     if created:
-        save_seen("news", seen + [_seen_key(c["title"]) for c in created])
-        logger.info("recorded {} stories", len(created))
+        logger.info("selected {} stories", len(created))
     return created
 
 
-def pick_humor_themes(count: int) -> list[dict]:
-    """Pick dev-humor themes, preferring ones not used recently.
+def pick_themes(content_type: str, count: int) -> list[dict]:
+    """Pick themes for a theme-driven content type, preferring ones not used recently.
 
     Themes are a fixed curated list and are intentionally reusable — the model
-    writes a fresh joke each run (temperature 0.95) — but we still rotate so the
+    writes a fresh piece each run (high temperature) — but we still rotate so the
     same metaphor doesn't appear two days running. When all themes have been used
     the history resets and rotation starts over.
     """
-    from app.pipeline.prompts import DEV_HUMOR_THEMES
+    from app.pipeline.prompts import CODE_HEARTBREAK_THEMES, DEV_HUMOR_THEMES
 
     from app.services.performance import theme_weights, weighted_sample
 
-    recent = load_seen("dev_humor")
+    theme_list = {
+        "dev_humor": DEV_HUMOR_THEMES,
+        "code_heartbreak": CODE_HEARTBREAK_THEMES,
+    }[content_type]
+
+    recent = load_seen(content_type)
     recent_set = set(recent)
-    available = [t for t in DEV_HUMOR_THEMES if _seen_key(t) not in recent_set]
+    available = [t for t in theme_list if _seen_key(t) not in recent_set]
     if len(available) < count:
-        logger.info("all humor themes cycled — resetting rotation")
-        recent, recent_set, available = [], set(), list(DEV_HUMOR_THEMES)
+        logger.info("all {} themes cycled — resetting rotation", content_type)
+        recent, recent_set, available = [], set(), list(theme_list)
 
     # Feedback loop: themes whose past videos measurably earned likes/comments get
     # up to 4x the draw odds; untested themes keep base weight so we still explore.
-    chosen = weighted_sample(available, theme_weights(available), min(count, len(available)))
+    chosen = weighted_sample(
+        available, theme_weights(available, content_type), min(count, len(available))
+    )
 
     created: list[dict] = []
     with session_scope() as db:
@@ -175,27 +207,54 @@ def pick_humor_themes(count: int) -> list[dict]:
             db.flush()
             created.append({"project_id": project.id, "title": theme})
 
+    # As with news: recorded on successful render (record_seen / main), not here,
+    # so a failed run doesn't consume a theme from the curated rotation.
     if created:
-        save_seen("dev_humor", recent + [_seen_key(c["title"]) for c in created])
-        logger.info("selected {} humor theme(s)", len(created))
+        logger.info("selected {} {} theme(s)", len(created), content_type)
     return created
 
 
-def generate(project_id: int, title: str, content_type: str) -> bool:
+def generate(
+    project_id: int,
+    title: str,
+    content_type: str,
+    video_format: str = "short",
+    topic_source: str = "",
+) -> bool:
+    from app.core.tracing import trace_run
     from app.pipeline.graph import run_pipeline
 
     started = time.perf_counter()
-    try:
-        run_pipeline(project_id, title, "short", content_type=content_type)
-        logger.info("[{}] generated in {:.0f}s", project_id, time.perf_counter() - started)
-        return True
-    except Exception as e:  # noqa: BLE001
-        logger.error("[{}] generation failed: {}", project_id, e)
-        traceback.print_exc()
-        return False
+    # One video = one root trace. Without this the graph run, and any LLM call made
+    # outside it, land as separate top-level trees and there is no single thing to
+    # open when you want to know what happened to a given upload.
+    with trace_run(
+        f"{content_type}/{video_format}",
+        project_id=project_id,
+        topic=title,
+        content_type=content_type,
+        video_format=video_format,
+        topic_source=topic_source,
+    ):
+        try:
+            run_pipeline(
+                project_id,
+                title,
+                video_format,
+                content_type=content_type,
+                topic_source=topic_source,
+            )
+            logger.info("[{}] generated in {:.0f}s", project_id, time.perf_counter() - started)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.error("[{}] generation failed: {}", project_id, e)
+            traceback.print_exc()
+            return False
 
 
-def publish(project_id: int, privacy: str) -> str | None:
+def publish(
+    project_id: int, privacy: str, content_type: str = "news", slot_index: int = 0
+) -> str | None:
     from app.services import youtube
 
     if not youtube.is_authorized():
@@ -215,22 +274,123 @@ def publish(project_id: int, privacy: str) -> str | None:
             "thumbnail_path": p.thumbnail_path,
         }
 
+    # Scheduling only makes sense for a video meant to go public: scheduling a
+    # deliberately private test upload would flip it public at the slot, which is
+    # the opposite of what --privacy private asks for.
+    publish_at = None
+    if privacy == "public":
+        publish_at = youtube.next_publish_slot(
+            offset_minutes=slot_index * settings.youtube_publish_stagger_minutes
+        )
+
     try:
-        video_id = youtube.upload_video(privacy=privacy, **payload)
+        video_id = youtube.upload_video(
+            privacy=privacy,
+            publish_at=publish_at,
+            category_id=settings.category_for(content_type),
+            **payload,
+        )
     except Exception as e:  # noqa: BLE001
         logger.error("[{}] upload failed: {}", project_id, e)
         if "quotaExceeded" in str(e):
             logger.error("daily YouTube quota exhausted (~6 uploads/day)")
+        if "invalid_grant" in str(e):
+            logger.error(EXPIRED_GRANT_HELP)
         return None
 
+    # When scheduled, the video is uploaded now but goes live at the slot — record
+    # the moment it actually reaches viewers, not the moment the runner finished.
+    live_at = (
+        datetime.strptime(publish_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        if publish_at
+        else datetime.now(timezone.utc)
+    )
     with session_scope() as db:
         p = db.get(Project, project_id)
         if p:
             p.youtube_video_id = video_id
             p.status = ProjectStatus.PUBLISHED
-            p.published_at = datetime.now(timezone.utc)
-    logger.info("[{}] published https://youtu.be/{}", project_id, video_id)
+            p.published_at = live_at
+    logger.info(
+        "[{}] {} https://youtu.be/{}",
+        project_id,
+        f"scheduled for {publish_at}" if publish_at else "published",
+        video_id,
+    )
     return video_id
+
+
+EXPIRED_GRANT_HELP = (
+    "The YouTube refresh token is dead (invalid_grant). Almost always this means the "
+    "Google Cloud OAuth consent screen is still in 'Testing': Google expires those "
+    "refresh tokens after 7 days. Fix it once:\n"
+    "  1. console.cloud.google.com -> APIs & Services -> OAuth consent screen -> "
+    "Publish app (status must read 'In production').\n"
+    "  2. python scripts/youtube_auth.py   (mints a fresh secrets/youtube_token.json)\n"
+    "  3. Paste that file's contents into the YOUTUBE_TOKEN_JSON repo secret."
+)
+
+
+def _preflight_youtube() -> None:
+    """Verify the OAuth grant still refreshes before generating anything.
+
+    Costs no API quota (see youtube.check_credentials) and turns a 9-minute
+    render followed by a dead-token upload into a 2-second failure.
+    """
+    from app.services import youtube
+
+    if not youtube.is_authorized():
+        raise SystemExit(
+            "preflight: YouTube not authorized — is the YOUTUBE_TOKEN_JSON secret set?"
+        )
+    try:
+        youtube.check_credentials()
+    except Exception as e:  # noqa: BLE001
+        if "invalid_grant" in str(e):
+            raise SystemExit(f"preflight: {EXPIRED_GRANT_HELP}") from e
+        # Anything else (a transient network blip refreshing the token) is not
+        # worth aborting a run over — the upload retries it at the end anyway.
+        logger.warning("preflight: couldn't verify YouTube token ({}); continuing", e)
+        return
+    logger.info("preflight: YouTube token refreshes ok")
+
+
+def preflight(dry_run: bool = False) -> None:
+    """Fail fast on misconfiguration BEFORE spending scarce LLM/image quota.
+
+    Two checks: the YouTube grant (skipped on a dry run, which never uploads)
+    and the edge-TTS voice name. An unknown voice only surfaces at
+    the voiceover stage — after minutes of LLM drafting and image generation —
+    as NoAudioReceived (this bit us once with a voice that didn't exist). Listing
+    voices is free and touches no LLM quota, so validating up front is cheap
+    insurance. A network failure fetching the list is non-fatal; we abort only on
+    a voice that is definitively not in the catalog.
+
+    LLM reachability is deliberately NOT probed here: a live call would spend one
+    of the scarce free-tier requests, and the pipeline's own failover already
+    absorbs a transient outage.
+    """
+    if not dry_run:
+        _preflight_youtube()
+    if (settings.tts_provider or "").lower() != "edge":
+        return
+    voice = settings.edge_tts_voice
+    if not voice:
+        return
+    try:
+        import asyncio  # noqa: PLC0415
+        import edge_tts  # noqa: PLC0415
+
+        names = {v["ShortName"] for v in asyncio.run(edge_tts.list_voices())}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("preflight: couldn't fetch edge-tts voices ({}); skipping check", e)
+        return
+    if voice not in names:
+        raise SystemExit(
+            f"preflight: EDGE_TTS_VOICE '{voice}' is not a valid edge-tts voice — "
+            "run `python scripts/list_voices.py` for valid names."
+        )
+    logger.info("preflight: edge-tts voice '{}' ok", voice)
 
 
 def main() -> int:
@@ -240,50 +400,124 @@ def main() -> int:
     parser.add_argument(
         "--content-type",
         default="news",
-        choices=["news", "dev_humor"],
-        help="news = AI news from feeds; dev_humor = developer comedy from themes",
+        choices=["news", "dev_humor", "code_heartbreak"],
+        help=(
+            "news = AI news from feeds; dev_humor = developer comedy from themes; "
+            "code_heartbreak = sad one-sided-love coding quotes from themes"
+        ),
+    )
+    parser.add_argument(
+        "--format",
+        default="short",
+        choices=["short", "long"],
+        help="short = vertical Shorts; long = 16:9 4-6 minute video (news only)",
     )
     parser.add_argument("--dry-run", action="store_true", help="generate but do not upload")
     args = parser.parse_args()
 
+    # Themed types are written as shorts (a 5-minute heartbreak quote isn't a thing).
+    if args.format == "long" and args.content_type != "news":
+        parser.error("--format long is only supported with --content-type news")
+
     setup_logging()
+    # Before any LLM client or graph is built: LangChain reads the tracing environment
+    # when a run starts, so configuring it later would leave the first stages untraced.
+    setup_tracing()
+
+    # Long-form draws on Gemini's free tier (when a key is configured) so it never
+    # competes with Shorts for the OpenRouter daily budget. Set before get_llm() is
+    # first called, so the client picks the right provider. Shorts never touch
+    # Gemini — the guard is on video_format, not just key presence.
+    if args.format == "long" and settings.gemini_api_key:
+        settings.llm_provider = "gemini"
+        logger.info("long-form run: LLM provider = gemini")
+    elif args.format == "long":
+        logger.info("long-form run: no GEMINI_API_KEY set — using OpenRouter")
+
+    # Long-form's bigger prompts need a different OpenRouter chain order and a longer
+    # timeout than Shorts. Scoped here rather than changed globally so the three daily
+    # Shorts streams keep the exact model that has produced their 80+ videos. Applied
+    # before get_llm() caches its client, same as the provider switch above.
+    if args.format == "long":
+        settings.llm_models = settings.llm_models_long
+        settings.llm_timeout_seconds = settings.llm_timeout_seconds_long
+        settings.llm_chat_budget_seconds = settings.llm_chat_budget_seconds_long
+        logger.info(
+            "long-form run: model chain = {} (timeout {}s, budget {}s)",
+            settings.llm_model_chain,
+            settings.llm_timeout_seconds,
+            settings.llm_chat_budget_seconds,
+        )
+
     logger.info(
         "daily run: type={} count={} privacy={}", args.content_type, args.count, args.privacy
     )
+    preflight(args.dry_run)  # cheap config check before any LLM/image work
     _ensure_schema()
 
-    if args.content_type == "dev_humor":
-        topics = pick_humor_themes(args.count)
+    if args.content_type in ("dev_humor", "code_heartbreak"):
+        topics = pick_themes(args.content_type, args.count)
     else:
-        topics = pick_topics(args.count)
+        fmt = VideoFormat.LONG if args.format == "long" else VideoFormat.SHORT
+        topics = pick_topics(args.count, fmt)
     if not topics:
         logger.error("no topics to generate (all recently covered)")
         return 1
 
+    # CI cancels the job at timeout-minutes and that kills the upload step outright,
+    # so a run that overruns publishes nothing at all — even work that had already
+    # rendered. Stop starting new videos once there isn't plausibly time to finish
+    # one, and exit normally instead.
+    budget = settings.run_budget_minutes * 60
+    run_started = time.perf_counter()
+    slowest = 0.0
+
     published: list[str] = []
-    for item in topics:
+    for index, item in enumerate(topics):
         pid, title = item["project_id"], item["title"]
-        logger.info("--- project {}: {}", pid, title)
-        if not generate(pid, title, args.content_type):
+        remaining = budget - (time.perf_counter() - run_started)
+        # First video always gets its chance; later ones need room for a project at
+        # least as slow as the slowest so far (floor: 12 min, a normal render).
+        if index and remaining < max(slowest, 12 * 60):
+            logger.warning(
+                "run budget nearly spent ({:.0f}s left of {}min) — skipping the "
+                "remaining {} topic(s) rather than being cancelled mid-render",
+                remaining,
+                settings.run_budget_minutes,
+                len(topics) - index,
+            )
+            break
+        # Themed runs (pick_themes) carry no source; they're always the tech branding.
+        source = item.get("source", "")
+        logger.info("--- project {}: {} [{}]", pid, title, source or "theme")
+        project_started = time.perf_counter()
+        ok = generate(pid, title, args.content_type, args.format, source)
+        slowest = max(slowest, time.perf_counter() - project_started)
+        if not ok:
             continue
+        # Render succeeded — only now is it safe to mark the topic/theme covered.
+        record_seen(args.content_type, title)
         if args.dry_run:
             logger.info("[{}] dry-run: skipping upload", pid)
             published.append(f"(dry-run) {title}")
             continue
-        if video_id := publish(pid, args.privacy):
+        # slot_index staggers each video in this run away from the previous one, so
+        # a 2-video news run doesn't drop both Shorts into the same instant.
+        if video_id := publish(pid, args.privacy, args.content_type, len(published)):
             published.append(f"https://youtu.be/{video_id}  {title}")
             # Ledger feeds the weekly stats collector (scripts/collect_stats.py);
             # without it, ephemeral CI runners forget what was ever published.
             from app.services.performance import record_published
 
-            record_published(video_id, args.content_type, title)
+            record_published(video_id, args.content_type, title, args.format)
 
     print("\n" + "=" * 60)
     if published:
-        print(f"{len(published)}/{len(topics)} published as {args.privacy}:")
+        slot = settings.youtube_publish_slot
+        how = f"scheduled for {slot} UTC" if (slot and args.privacy == "public") else args.privacy
+        print(f"{len(published)}/{len(topics)} published as {how}:")
         for line in published:
             print("  " + line)
-        print("\nReview in YouTube Studio, then switch to Public.")
     else:
         print("Nothing published.")
     print("=" * 60)

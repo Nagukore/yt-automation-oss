@@ -1,22 +1,24 @@
-name: Daily Dev Humor Video
+name: Daily Code Heartbreak Video
 
-# Separate from the AI-news workflow so the two content streams have independent
-# schedules and dedupe history (state/seen_dev_humor.json vs state/seen.json).
-# Shares the same secrets and YouTube channel unless you point it at another one.
+# Third content stream: sad one-sided-love coding quotes (codemetaphor style).
+# Separate workflow so it keeps its own schedule and dedupe history
+# (state/seen_code_heartbreak.json). Shares secrets and the YouTube channel.
 
 on:
   schedule:
-    # 23:00 UTC starts the run; YOUTUBE_PUBLISH_SLOT decides when it goes live
-    # (00:30 UTC the next day = 20:30 ET / 17:30 PT, the evening scroll window when
-    # relatable comedy gets watched and shared). See daily-video.yml for why the
-    # cron is no longer the publish time.
-    # Offset from the 21:00 news run and the 00:30 heartbreak run so uploads never
-    # collide against the ~6/day YouTube quota.
-    - cron: "0 23 * * *"
+    # 00:30 UTC starts the run; YOUTUBE_PUBLISH_SLOT decides when it goes live
+    # (02:00 UTC = 22:00 ET / 19:00 PT, previous calendar day in the US). Late
+    # evening is when sad-quote reels actually land.
+    # This stream had the worst drift of all under the old scheme: a 00:50 cron was
+    # publishing at 03:29 UTC median, +2h39m. See daily-video.yml.
+    # Total is still 4 uploads/day (2 news + 1 humor + 1 heartbreak) against the
+    # ~6/day YouTube quota, and the run stays clear of the 21:00 news and 23:00
+    # humor jobs.
+    - cron: "30 0 * * *"
   workflow_dispatch:
     inputs:
       count:
-        description: "How many humor videos to generate"
+        description: "How many heartbreak videos to generate"
         default: "1"
       privacy:
         description: "private | unlisted | public"
@@ -26,11 +28,11 @@ on:
         default: "false"
 
 concurrency:
-  group: daily-humor
+  group: daily-heartbreak
   cancel-in-progress: false
 
 permissions:
-  contents: write        # commit state/seen_dev_humor.json back after a run
+  contents: write        # commit state/seen_code_heartbreak.json back after a run
   issues: write          # file a failure issue (see "Open an issue on failure")
 
 jobs:
@@ -52,11 +54,8 @@ jobs:
           pip install -e .
 
       - name: Verify FFmpeg
-        # Runs AFTER install because FFmpeg is no longer preinstalled on the
-        # Ubuntu runner — the pipeline falls back to imageio-ffmpeg's bundled
-        # binary, which only exists once deps are in. (The old check was
-        # `ffmpeg -version | head -1`, whose exit status came from head, so it
-        # stayed green while printing "command not found".)
+        # After install: FFmpeg is no longer preinstalled on the runner, so the
+        # pipeline uses imageio-ffmpeg's bundled binary. See daily-humor.yml.
         run: python -c "import sys; from app.media.video import _ffmpeg_exe; exe=_ffmpeg_exe(); print(exe or 'no ffmpeg found'); sys.exit(0 if exe else 1)"
 
       - name: Restore YouTube OAuth token
@@ -69,7 +68,7 @@ jobs:
           printf '%s' "$YOUTUBE_CLIENT_SECRET_JSON"  > secrets/youtube_client_secret.json
           python -c "import json;json.load(open('secrets/youtube_token.json'));print('token ok')"
 
-      - name: Run humor pipeline
+      - name: Run heartbreak pipeline
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           DATABASE_URL: sqlite:///./run.db
@@ -78,12 +77,15 @@ jobs:
           SUBTITLE_PROVIDER: edge
           IMAGE_PROVIDER: pollinations
           IMAGE_CONCURRENCY: "1"
-          # A slower, warmer voice suits the melancholy tone better than the news voice.
-          EDGE_TTS_VOICE: en-US-GuyNeural
-          EDGE_TTS_RATE: "-8%"
+          # Softer and slower than the humor voice — these are quiet, aching
+          # quotes, not comedy; the pause between sentences is part of the mood.
+          # Must be a voice edge-tts actually serves (scripts/list_voices.py);
+          # an unknown name fails with NoAudioReceived.
+          EDGE_TTS_VOICE: en-US-BrianNeural
+          EDGE_TTS_RATE: "-12%"
           YOUTUBE_UPLOAD_PRIVACY: ${{ github.event.inputs.privacy || 'public' }}
-          # 00:30 UTC (next day) = 20:30 ET / 17:30 PT. See daily-video.yml.
-          YOUTUBE_PUBLISH_SLOT: "00:30"
+          # 02:00 UTC = 22:00 ET / 19:00 PT. See daily-video.yml.
+          YOUTUBE_PUBLISH_SLOT: "02:00"
           MEDIA_ROOT: ./media_output
           LOG_LEVEL: INFO
           # Tracing is opt-in and self-arming: with no LANGSMITH_API_KEY secret set,
@@ -94,7 +96,7 @@ jobs:
           LANGSMITH_PROJECT: yt-automation
         run: |
           python scripts/run_daily.py \
-            --content-type dev_humor \
+            --content-type code_heartbreak \
             --count "${{ github.event.inputs.count || 1 }}" \
             ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
 
@@ -105,7 +107,7 @@ jobs:
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add state/
-            git commit -m "chore: record humor themes [skip ci]"
+            git commit -m "chore: record heartbreak themes [skip ci]"
             git push
           else
             echo "no new themes to record"
@@ -118,7 +120,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: humor-video
+          name: heartbreak-video
           path: |
             media_output/**/video/*.mp4
             media_output/**/audio/*.srt
@@ -130,7 +132,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: humor-logs
+          name: heartbreak-logs
           path: logs/
           retention-days: 7
 

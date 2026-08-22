@@ -1,22 +1,33 @@
-name: Daily Dev Humor Video
+name: Weekly Long-Form Video
 
-# Separate from the AI-news workflow so the two content streams have independent
-# schedules and dedupe history (state/seen_dev_humor.json vs state/seen.json).
-# Shares the same secrets and YouTube channel unless you point it at another one.
+# Long-form (4-6 min, 16:9) videos on US trending news, twice a week.
+# Topics come from Google Trends US, grounded in the real news headline the
+# feed attaches to each trend so the script has facts to work from. Long-form
+# is where watch-time revenue lives; Shorts feed discovery.
+#
+# Geo is US, not IN, deliberately: YouTube pays on where the VIEWER sits, and
+# US long-form RPM runs ~10-20x India's. India-trending topics are also
+# geo-locked — a US viewer will never be served a video about an IPL match —
+# so the topic feed caps the audience before the algorithm ever gets a say.
+#
+# Shares state/seen.json with the daily news workflow, so the two can never
+# cover the same story twice.
 
 on:
   schedule:
-    # 23:00 UTC starts the run; YOUTUBE_PUBLISH_SLOT decides when it goes live
-    # (00:30 UTC the next day = 20:30 ET / 17:30 PT, the evening scroll window when
-    # relatable comedy gets watched and shared). See daily-video.yml for why the
-    # cron is no longer the publish time.
-    # Offset from the 21:00 news run and the 00:30 heartbreak run so uploads never
-    # collide against the ~6/day YouTube quota.
-    - cron: "0 23 * * *"
+    # Wed + Sat 17:50 UTC. Unlike the Shorts workflows the cron is NOT the publish
+    # time here: the upload runs at the END of the job, and a long-form render takes
+    # roughly 1-3 hours (16 images generated serially, then a 6-minute 1080p encode).
+    # So 17:50 UTC lands the actual publish around 19:00-21:00 UTC = 15:00-17:00 US
+    # Eastern, heading into the evening when long-form gets watched.
+    # Re-time this if the render duration changes materially.
+    # The :50 buys back the queue delay GitHub adds on the hour — see daily-video.yml.
+    # It matters least here, since the render time dominates the publish slot anyway.
+    - cron: "50 17 * * 3,6"
   workflow_dispatch:
     inputs:
       count:
-        description: "How many humor videos to generate"
+        description: "How many long videos to generate"
         default: "1"
       privacy:
         description: "private | unlisted | public"
@@ -26,17 +37,21 @@ on:
         default: "false"
 
 concurrency:
-  group: daily-humor
+  group: weekly-longform
   cancel-in-progress: false
 
 permissions:
-  contents: write        # commit state/seen_dev_humor.json back after a run
+  contents: write        # commit state/seen.json back after a run
   issues: write          # file a failure issue (see "Open an issue on failure")
 
 jobs:
   generate-and-upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # A long video is ~16 scene images (~13 min serial) plus a slower 1080p render,
+    # so give it more room than the shorts workflows. 90 min was too tight once the
+    # free-model LLM stages (which sleep 20s/60s between rate-limit sweeps) are added
+    # on top, and a timeout kills the run after all the quota has already been spent.
+    timeout-minutes: 180
 
     steps:
       - uses: actions/checkout@v4
@@ -52,11 +67,8 @@ jobs:
           pip install -e .
 
       - name: Verify FFmpeg
-        # Runs AFTER install because FFmpeg is no longer preinstalled on the
-        # Ubuntu runner — the pipeline falls back to imageio-ffmpeg's bundled
-        # binary, which only exists once deps are in. (The old check was
-        # `ffmpeg -version | head -1`, whose exit status came from head, so it
-        # stayed green while printing "command not found".)
+        # After install: FFmpeg is no longer preinstalled on the runner, so the
+        # pipeline uses imageio-ffmpeg's bundled binary. See daily-humor.yml.
         run: python -c "import sys; from app.media.video import _ffmpeg_exe; exe=_ffmpeg_exe(); print(exe or 'no ffmpeg found'); sys.exit(0 if exe else 1)"
 
       - name: Restore YouTube OAuth token
@@ -69,21 +81,27 @@ jobs:
           printf '%s' "$YOUTUBE_CLIENT_SECRET_JSON"  > secrets/youtube_client_secret.json
           python -c "import json;json.load(open('secrets/youtube_token.json'));print('token ok')"
 
-      - name: Run humor pipeline
+      - name: Run long-form pipeline
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Long-form uses Gemini's free tier (run_daily selects it for --format
+          # long when this key is set), keeping Shorts' OpenRouter budget intact.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DATABASE_URL: sqlite:///./run.db
           JWT_SECRET_KEY: ci-not-used
+          TREND_PROVIDER: google_trends
+          TREND_GEO: US
           TTS_PROVIDER: edge
           SUBTITLE_PROVIDER: edge
           IMAGE_PROVIDER: pollinations
           IMAGE_CONCURRENCY: "1"
-          # A slower, warmer voice suits the melancholy tone better than the news voice.
-          EDGE_TTS_VOICE: en-US-GuyNeural
-          EDGE_TTS_RATE: "-8%"
           YOUTUBE_UPLOAD_PRIVACY: ${{ github.event.inputs.privacy || 'public' }}
-          # 00:30 UTC (next day) = 20:30 ET / 17:30 PT. See daily-video.yml.
-          YOUTUBE_PUBLISH_SLOT: "00:30"
+          # 21:00 UTC = 17:00 ET / 14:00 PT on the Wed/Sat run days.
+          # Long-form is the one stream where the render (1-3h) genuinely dominates,
+          # so this slot is a ceiling rather than a precise target: a run that finishes
+          # after 21:00 publishes immediately instead of waiting a week — see
+          # youtube.next_publish_slot and YOUTUBE_PUBLISH_MAX_LEAD_HOURS.
+          YOUTUBE_PUBLISH_SLOT: "21:00"
           MEDIA_ROOT: ./media_output
           LOG_LEVEL: INFO
           # Tracing is opt-in and self-arming: with no LANGSMITH_API_KEY secret set,
@@ -94,21 +112,21 @@ jobs:
           LANGSMITH_PROJECT: yt-automation
         run: |
           python scripts/run_daily.py \
-            --content-type dev_humor \
+            --format long \
             --count "${{ github.event.inputs.count || 1 }}" \
             ${{ github.event.inputs.dry_run == 'true' && '--dry-run' || '' }}
 
-      - name: Persist covered-theme list + published ledger
+      - name: Persist covered-story list + published ledger
         if: always()
         run: |
           if [[ -n "$(git status --porcelain state/)" ]]; then
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add state/
-            git commit -m "chore: record humor themes [skip ci]"
+            git commit -m "chore: record covered stories [skip ci]"
             git push
           else
-            echo "no new themes to record"
+            echo "no new stories to record"
           fi
 
       - name: Upload rendered video for review
@@ -118,7 +136,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: humor-video
+          name: longform-video
           path: |
             media_output/**/video/*.mp4
             media_output/**/audio/*.srt
@@ -130,11 +148,12 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: humor-logs
+          name: longform-logs
           path: logs/
           retention-days: 7
 
-      # See daily-video.yml for why: public auto-publish means a failed run is silent.
+      # Matters most here: long-form runs twice a week and has never yet completed, so
+      # a silent failure could go unnoticed for days. See daily-video.yml.
       - name: Open an issue on failure
         if: failure()
         env:

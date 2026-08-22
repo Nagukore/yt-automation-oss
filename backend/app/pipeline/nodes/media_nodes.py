@@ -13,10 +13,11 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.logging import logger
+from app.core.tracing import tag_current_run
 from app.media.images import get_image_provider, write_placeholder
 from app.media.subtitles import get_subtitle_provider
 from app.media.tts import get_tts_provider
-from app.media.video import assemble_video
+from app.media.video import assemble_video, pick_music
 from app.pipeline.state import PipelineState
 
 
@@ -74,6 +75,16 @@ def images_node(state: PipelineState) -> PipelineState:
         time.perf_counter() - started,
         workers,
     )
+    # Placeholder count is the number that predicts a bad video, and it appears
+    # nowhere in the node's output state — the paths look identical either way.
+    tag_current_run(
+        image_provider=settings.image_provider,
+        requested=len(jobs),
+        real=real,
+        placeholders=len(failed),
+        workers=workers,
+        seconds=round(time.perf_counter() - started, 1),
+    )
     # A video made mostly of gradients isn't worth a human's review slot.
     if real < len(jobs) / 2:
         raise RuntimeError(
@@ -90,6 +101,17 @@ def voiceover_node(state: PipelineState) -> PipelineState:
     # returned path rather than the one we requested.
     written = provider.synthesize(state["script"], dest)
     logger.info("[{}] voiceover done -> {}", state["project_id"], Path(written).name)
+    # The graph records the state in and out; which provider served it, and whether
+    # the word-timing sidecar that drives the captions actually landed, is not in
+    # either — and a missing sidecar silently downgrades captions to static SRT.
+    words = Path(written).with_name(Path(written).stem + ".words.json")
+    tag_current_run(
+        tts_provider=settings.tts_provider,
+        voice=settings.edge_tts_voice,
+        script_chars=len(state.get("script") or ""),
+        audio_kb=round(Path(written).stat().st_size / 1024) if Path(written).exists() else 0,
+        word_timings=words.exists(),
+    )
     return {"audio_path": str(written)}
 
 
@@ -98,18 +120,38 @@ def subtitles_node(state: PipelineState) -> PipelineState:
     dest = settings.project_media_dir(state["project_id"]) / "audio" / "subtitles.srt"
     provider.transcribe(state["audio_path"], dest)
     logger.info("[{}] subtitles done -> {}", state["project_id"], dest.name)
+    tag_current_run(
+        subtitle_provider=settings.subtitle_provider,
+        srt_bytes=dest.stat().st_size if dest.exists() else 0,
+    )
     return {"subtitle_path": str(dest)}
 
 
 def video_node(state: PipelineState) -> PipelineState:
     is_short = state.get("video_format", "short") == "short"
+    content_type = state.get("content_type", "news")
     dest = settings.project_media_dir(state["project_id"]) / "video" / "final.mp4"
+    music = pick_music(content_type)
+    if music:
+        logger.info("[{}] music bed: {}", state["project_id"], Path(music).name)
     assemble_video(
         image_paths=state["image_paths"],
         audio_path=state["audio_path"],
         subtitle_path=state.get("subtitle_path"),
         output_path=dest,
         vertical=is_short,
+        music_path=music,
+        # Heartbreak renders its phrase cues as a centered on-screen quote
+        # (the reel aesthetic); other types keep bottom captions.
+        subtitle_style="quote" if content_type == "code_heartbreak" else "default",
     )
     logger.info("[{}] video assembled -> {}", state["project_id"], dest)
+    tag_current_run(
+        vertical=is_short,
+        subtitle_style="quote" if content_type == "code_heartbreak" else "default",
+        animated_captions=settings.animated_captions,
+        music=Path(music).name if music else None,
+        scenes=len(state.get("image_paths") or []),
+        video_mb=round(dest.stat().st_size / 1048576, 1) if dest.exists() else 0,
+    )
     return {"video_path": str(dest)}

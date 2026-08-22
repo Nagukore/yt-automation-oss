@@ -17,6 +17,23 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.logging import logger
 
 
+def _seed(prompt: str, dest: Path) -> int:
+    """Generation seed for one scene: stable per video, different across videos.
+
+    Seeding on the prompt alone made the endpoint a pure function of the text, so
+    any two videos whose scene prompts collided got byte-identical pictures. With
+    themes on a rotation the collisions are not hypothetical — the same theme comes
+    round every few weeks and a small model tends to reach for the same imagery
+    ("rain on a dark window, single glowing monitor") when it does.
+
+    Mixing the destination in fixes that while keeping the property worth having:
+    `dest` is project_<id>/images/scene_<n>.png, so re-rendering a project rebuilds
+    exactly the same images rather than quietly producing a different video.
+    """
+    key = f"{prompt}\x00{dest.parent.parent.name}\x00{dest.stem}"
+    return int(hashlib.sha256(key.encode()).hexdigest(), 16) % 1_000_000
+
+
 class PollinationsProvider:
     BASE = "https://image.pollinations.ai/prompt"
 
@@ -47,11 +64,47 @@ class PollinationsProvider:
         """
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        seed = int(hashlib.sha256(prompt.encode()).hexdigest(), 16) % 1_000_000
-        data = self._fetch(prompt, width, height, seed)
+        data = self._fetch(prompt, width, height, _seed(prompt, dest))
         dest.write_bytes(data)
+        _warn_if_undersized(dest, width, height)
         logger.debug("pollinations image saved {}", dest.name)
         return dest
+
+
+def _warn_if_undersized(dest: Path, width: int, height: int) -> None:
+    """Log when the endpoint returns an image smaller than the frame it must fill.
+
+    Pollinations treats width/height as an aspect-ratio hint rather than a size: a
+    1080x1920 request comes back 576x1024, and so does every other combination —
+    measured across `flux`, `turbo`, `sana` and the default, at four request sizes.
+    (`/models` now lists only `sana`, so the `model=flux` above is silently falling
+    back to it; changing that would change the look of a running channel, so it is
+    left alone deliberately.)
+
+    The renderer then enlarges by ~2.1x to fill the frame, which means the video is
+    sourced at roughly a third of its nominal resolution. Nothing said so before this:
+    the image count was right, so the run logged `7/7 real` and looked healthy. That
+    silence is the actual bug — the soft output is a provider limit, but not knowing
+    about it is ours.
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    try:
+        got_w, got_h = Image.open(dest).size
+    except Exception as e:  # noqa: BLE001
+        logger.debug("could not measure {}: {}", dest.name, e)
+        return
+    if got_w < width or got_h < height:
+        logger.warning(
+            "{}: provider returned {}x{} for a {}x{} request; the render will enlarge "
+            "it {:.1f}x and sharpen to compensate",
+            dest.name,
+            got_w,
+            got_h,
+            width,
+            height,
+            max(width / got_w, height / got_h),
+        )
 
 
 def write_placeholder(dest: Path, width: int, height: int, prompt: str) -> None:

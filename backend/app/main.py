@@ -11,11 +11,13 @@ from app.api.routes import approval, auth, dashboard, projects, publish, topics
 from app.bootstrap import create_tables, ensure_admin
 from app.core.config import settings
 from app.core.logging import logger, setup_logging
+from app.core.tracing import setup_tracing
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    setup_tracing()
     logger.info("starting AI YouTube Automation API ({} env)", settings.app_env)
     if settings.app_env != "production":
         create_tables()  # in prod, run alembic migrations instead

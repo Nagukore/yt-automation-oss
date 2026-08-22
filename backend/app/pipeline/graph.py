@@ -100,7 +100,11 @@ def _persist_stage(project_id: int, stage: str, state: PipelineState) -> None:
 
 
 def run_pipeline(
-    project_id: int, topic: str, video_format: str, content_type: str = "news"
+    project_id: int,
+    topic: str,
+    video_format: str,
+    content_type: str = "news",
+    topic_source: str = "",
 ) -> PipelineState:
     """Execute the full graph for a project, streaming progress to the DB."""
     graph = build_graph()
@@ -109,6 +113,7 @@ def run_pipeline(
         "topic": topic,
         "video_format": video_format,
         "content_type": content_type,
+        "topic_source": topic_source,
     }
     logger.info(
         "[{}] pipeline start type={} topic='{}' format={}",

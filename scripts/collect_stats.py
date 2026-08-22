@@ -31,6 +31,60 @@ from app.core.logging import logger, setup_logging  # noqa: E402
 from app.services import performance  # noqa: E402
 
 
+def _geography_section(geo: dict) -> list[str]:
+    """Views by country, with the previous window beside it.
+
+    The comparison column is the point of this table. A country's share moving a
+    few points looks like a trend and almost never is: at this channel's volume a
+    single Short reaching a different feed is worth several percent, so a share
+    quoted on its own invites chasing noise. Printing the previous window and the
+    absolute view counts next to it makes that obvious at a glance.
+    """
+    countries = geo.get("countries") or []
+    if not countries:
+        return []
+
+    prev = {c["country"]: c for c in geo.get("previous_countries") or []}
+    window, previous = geo.get("window", {}), geo.get("previous_window", {})
+    total = sum(c["views"] for c in countries)
+    prev_total = sum(c["views"] for c in (geo.get("previous_countries") or []))
+
+    lines = [
+        "## Audience by country",
+        "",
+        f"_{window.get('start', '?')} to {window.get('end', '?')}, {total:,} views "
+        f"(previous window {previous.get('start', '?')} to "
+        f"{previous.get('end', '?')}: {prev_total:,})._",
+        "",
+        "| Country | Views | Prev views | Change | Share | Prev share | Avg view |",
+        "|---------|------:|-----------:|-------:|------:|-----------:|---------:|",
+    ]
+    for c in countries[:12]:
+        p = prev.get(c["country"])
+        avg = c.get("avg_view_seconds", 0)
+        prev_views = f"{p['views']:,}" if p else "—"
+        change = f"{c['views'] - p['views']:+,}" if p else "—"
+        prev_share = f"{p['share']:.1f}%" if p else "—"
+        lines.append(
+            f"| {c['country']} | {c['views']:,} | {prev_views} | {change} "
+            f"| {c['share']:.1f}% | {prev_share} | {avg // 60}:{avg % 60:02d} |"
+        )
+
+    # Absolute views are listed first, and deliberately, because share is a ratio
+    # and a ratio moves when either side does. A country can lose several points of
+    # share in a window where its own views did not fall at all — the rest of the
+    # channel simply grew — and reading the percentage alone turns that into a
+    # phantom problem to chase.
+    lines += [
+        "",
+        "_Read the view columns before the share columns: share also moves when "
+        "the channel total moves, so a share change with flat views is arithmetic, "
+        "not audience loss._",
+        "",
+    ]
+    return lines
+
+
 def write_report(perf: dict[str, dict]) -> Path:
     """Render performance.json into a small markdown league table."""
     videos = sorted(perf.values(), key=lambda v: v.get("score", 0), reverse=True)
@@ -43,14 +97,44 @@ def write_report(perf: dict[str, dict]) -> Path:
         f"_Updated {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC — "
         f"{len(videos)} videos, {total_views:,} views, {total_likes:,} likes._",
         "",
-        "| # | Video | Type | Views | Likes | Comments | Score |",
-        "|---|-------|------|------:|------:|---------:|------:|",
+    ]
+
+    # Shorts vs long-form, side by side. Long-form costs ~30x the render time of a
+    # Short and is only worth it if the watch-time revenue follows, so the averages
+    # here are the number that decides whether to keep making them. Entries predating
+    # the video_format field are Shorts (long-form had never published back then).
+    by_format: dict[str, list[dict]] = {}
+    for v in videos:
+        by_format.setdefault(v.get("video_format", "short"), []).append(v)
+    if len(by_format) > 1:
+        lines += [
+            "## By format",
+            "",
+            "| Format | Videos | Avg views | Avg likes | Avg score |",
+            "|--------|-------:|----------:|----------:|----------:|",
+        ]
+        for fmt, vs in sorted(by_format.items()):
+            n = len(vs)
+            lines.append(
+                f"| {fmt} | {n} "
+                f"| {sum(v.get('views', 0) for v in vs) / n:,.0f} "
+                f"| {sum(v.get('likes', 0) for v in vs) / n:,.1f} "
+                f"| {sum(v.get('score', 0) for v in vs) / n:,.1f} |"
+            )
+        lines.append("")
+
+    lines += _geography_section(performance.load_geography())
+
+    lines += [
+        "| # | Video | Type | Format | Views | Likes | Comments | Score |",
+        "|---|-------|------|--------|------:|------:|---------:|------:|",
     ]
     for i, v in enumerate(videos[:30], 1):
         title = (v.get("title") or v.get("topic", ""))[:60].replace("|", "\\|")
         lines.append(
             f"| {i} | [{title}](https://youtu.be/{v['video_id']}) "
-            f"| {v.get('content_type', '?')} | {v.get('views', 0):,} "
+            f"| {v.get('content_type', '?')} | {v.get('video_format', 'short')} "
+            f"| {v.get('views', 0):,} "
             f"| {v.get('likes', 0):,} | {v.get('comments', 0):,} "
             f"| {v.get('score', 0):g} |"
         )

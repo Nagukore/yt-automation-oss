@@ -23,13 +23,28 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from app.core.config import settings
 from app.core.logging import logger
 
 LEDGER_LIMIT = 500  # entries; old videos age out of relevance anyway
+
+# Country breakdowns are NOT public statistics — no API key can read them, and the
+# Data API does not expose them at all. They come from the YouTube Analytics API,
+# which needs an OAuth token carrying this scope. The upload token does not have
+# it (youtube.upload only), so geography collection is best-effort: it logs what
+# to do and returns nothing rather than failing the weekly stats run.
+ANALYTICS_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly"
+UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+
+# Trailing window for the geography report. 28 days matches what YouTube Studio
+# shows by default, so the numbers here can be checked against it directly.
+GEO_WINDOW_DAYS = 28
+# Analytics data for the last day or two is still settling; including it makes
+# every week-on-week comparison look like a decline.
+GEO_LAG_DAYS = 2
 
 
 def _state_dir() -> Path:
@@ -71,8 +86,20 @@ def load_ledger() -> list[dict]:
     return _read_json(ledger_file()).get("videos", [])
 
 
-def record_published(video_id: str, content_type: str, topic: str) -> None:
-    """Append an upload to the committed ledger (idempotent per video_id)."""
+def record_published(
+    video_id: str, content_type: str, topic: str, video_format: str = "short"
+) -> None:
+    """Append an upload to the committed ledger (idempotent per video_id).
+
+    `video_format` matters because content_type alone cannot separate the streams:
+    the daily news Shorts and the weekly long-form videos both record as "news", so
+    without it a 45-second Short and a 6-minute video average together in the stats.
+    That distinction is the whole point of long-form (far higher RPM per view), so
+    the ledger has to carry it to answer whether long-form is worth its render cost.
+
+    Defaults to "short": entries written before this field existed are Shorts, since
+    long-form had never successfully published when it was added.
+    """
     videos = load_ledger()
     if any(v.get("video_id") == video_id for v in videos):
         return
@@ -80,6 +107,7 @@ def record_published(video_id: str, content_type: str, topic: str) -> None:
         {
             "video_id": video_id,
             "content_type": content_type,
+            "video_format": video_format,
             "topic": topic,
             "topic_key": topic_key(topic),
             "published_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -88,7 +116,7 @@ def record_published(video_id: str, content_type: str, topic: str) -> None:
     ledger_file().write_text(
         json.dumps({"videos": videos[-LEDGER_LIMIT:]}, indent=1), encoding="utf-8"
     )
-    logger.info("ledger: recorded {} ({})", video_id, content_type)
+    logger.info("ledger: recorded {} ({}, {})", video_id, content_type, video_format)
 
 
 # -------------------------------------------------------------------- stats
@@ -129,6 +157,105 @@ def fetch_stats(video_ids: list[str]) -> dict[str, dict]:
     return out
 
 
+# --------------------------------------------------------------- geography
+def _analytics_service():
+    """YouTube Analytics client, or None if the token can't read analytics.
+
+    Deliberately returns None rather than raising: geography is an addition to
+    the weekly stats run, and a channel whose token predates the analytics scope
+    should still get its view/like numbers collected as before.
+    """
+    token_file = Path(settings.youtube_token_file)
+    if not token_file.exists():
+        logger.info("no OAuth token — skipping geography")
+        return None
+    try:
+        granted = set(json.loads(token_file.read_text()).get("scopes") or [])
+    except (ValueError, OSError) as e:
+        logger.warning("could not read token scopes: {} — skipping geography", e)
+        return None
+    if ANALYTICS_SCOPE not in granted:
+        logger.warning(
+            "OAuth token lacks the yt-analytics.readonly scope, so country data "
+            "cannot be read. Re-run `python scripts/youtube_auth.py` (it now "
+            "requests that scope) and update the YOUTUBE_TOKEN_JSON secret."
+        )
+        return None
+
+    from google.oauth2.credentials import Credentials  # noqa: PLC0415
+    from googleapiclient.discovery import build  # noqa: PLC0415
+
+    creds = Credentials.from_authorized_user_file(
+        str(token_file), [UPLOAD_SCOPE, ANALYTICS_SCOPE]
+    )
+    return build("youtubeAnalytics", "v2", credentials=creds, cache_discovery=False)
+
+
+def _geo_query(service, start: date, end: date) -> list[dict]:
+    resp = (
+        service.reports()
+        .query(
+            ids="channel==MINE",
+            startDate=start.isoformat(),
+            endDate=end.isoformat(),
+            metrics="views,estimatedMinutesWatched,averageViewDuration",
+            dimensions="country",
+            sort="-views",
+            maxResults=25,
+        )
+        .execute()
+    )
+    total = sum(row[1] for row in resp.get("rows", []))
+    return [
+        {
+            "country": row[0],
+            "views": row[1],
+            "share": round(100 * row[1] / total, 1) if total else 0.0,
+            "watch_minutes": row[2],
+            "avg_view_seconds": row[3],
+        }
+        for row in resp.get("rows", [])
+    ]
+
+
+def fetch_geography() -> dict:
+    """Views by country for the trailing window, plus the window before it.
+
+    Both windows are fetched because the single number is nearly useless on its
+    own: at ~13 views per video, one Short landing in a different feed swings any
+    country's share by several points, and a share read in isolation gets
+    mistaken for a trend. Showing the previous window next to it makes the size
+    of the normal week-to-week wobble visible.
+    """
+    service = _analytics_service()
+    if service is None:
+        return {}
+
+    end = date.today() - timedelta(days=GEO_LAG_DAYS)
+    start = end - timedelta(days=GEO_WINDOW_DAYS - 1)
+    prev_end = start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=GEO_WINDOW_DAYS - 1)
+
+    try:
+        current = _geo_query(service, start, end)
+        previous = _geo_query(service, prev_start, prev_end)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("geography query failed: {} — skipping", e)
+        return {}
+
+    logger.info("geography: {} countries over {}..{}", len(current), start, end)
+    return {
+        "window": {"start": start.isoformat(), "end": end.isoformat()},
+        "previous_window": {"start": prev_start.isoformat(), "end": prev_end.isoformat()},
+        "countries": current,
+        "previous_countries": previous,
+    }
+
+
+def load_geography() -> dict:
+    return _read_json(performance_file()).get("geography", {})
+
+
 def _video_score(v: dict) -> float:
     """Single engagement number per video.
 
@@ -155,10 +282,15 @@ def collect_stats() -> dict:
             continue
         perf[vid] = {**entry, **stats[vid], "score": round(_video_score(stats[vid]), 2)}
 
+    # Best-effort: keeps the last successful breakdown when the token can't read
+    # analytics, so an unscoped token degrades to stale geography rather than none.
+    geography = fetch_geography() or load_geography()
+
     performance_file().write_text(
         json.dumps(
             {
                 "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "geography": geography,
                 "videos": perf,
             },
             indent=1,

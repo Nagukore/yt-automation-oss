@@ -2,9 +2,19 @@ name: Daily AI News Video
 
 on:
   schedule:
-    # 06:00 UTC daily (11:30 IST). GitHub may delay scheduled runs during peak load —
-    # a late daily upload is harmless. Cron is UTC only; adjust for your audience.
-    - cron: "0 6 * * *"
+    # 21:00 UTC starts the run; YOUTUBE_PUBLISH_SLOT below decides when the videos
+    # actually go live, so this only needs to be far enough ahead to finish.
+    #
+    # The old comment here claimed the cron WAS the publish time. Measured over
+    # 2026-08-05..19 it was not: the median news Short went live at 13:37 UTC off a
+    # 12:50 cron, and heartbreak drifted +2h39m. The `:50` trick did not buy the
+    # delay back. Uploads now carry status.publishAt, so GitHub can queue this run
+    # whenever it likes and the video still surfaces at the same minute every day.
+    #
+    # Timing rationale: 12:50 UTC put the two daily news Shorts — half of all
+    # output — at 19:07 IST, squarely in Indian prime time, and 09:37 ET, a dead
+    # US slot. The 22:30 slot is 18:30 ET / 15:30 PT instead.
+    - cron: "0 21 * * *"
   workflow_dispatch:          # lets you trigger a run manually from the Actions tab
     inputs:
       count:
@@ -12,7 +22,7 @@ on:
         default: "1"
       privacy:
         description: "private | unlisted | public"
-        default: "private"
+        default: "public"
       dry_run:
         description: "Generate but do not upload (true/false)"
         default: "false"
@@ -25,6 +35,7 @@ concurrency:
 
 permissions:
   contents: write              # needed to commit state/seen.json back after a run
+  issues: write                # file a failure issue (see "Open an issue on failure")
 
 jobs:
   generate-and-upload:
@@ -39,14 +50,15 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Verify FFmpeg
-        # Preinstalled on GitHub's Ubuntu runners; fail loudly if that ever changes.
-        run: ffmpeg -version | head -1
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e .
+
+      - name: Verify FFmpeg
+        # After install: FFmpeg is no longer preinstalled on the runner, so the
+        # pipeline uses imageio-ffmpeg's bundled binary. See daily-humor.yml.
+        run: python -c "import sys; from app.media.video import _ffmpeg_exe; exe=_ffmpeg_exe(); print(exe or 'no ffmpeg found'); sys.exit(0 if exe else 1)"
 
       - name: Restore YouTube OAuth token
         env:
@@ -70,9 +82,20 @@ jobs:
           SUBTITLE_PROVIDER: edge
           IMAGE_PROVIDER: pollinations
           IMAGE_CONCURRENCY: "1"
-          YOUTUBE_UPLOAD_PRIVACY: ${{ github.event.inputs.privacy || 'private' }}
+          YOUTUBE_UPLOAD_PRIVACY: ${{ github.event.inputs.privacy || 'public' }}
+          # Exact UTC go-live time. The run uploads private with status.publishAt and
+          # YouTube flips it public here. 22:30 UTC = 18:30 ET / 15:30 PT. The second
+          # video of the run is staggered +15 min so the two don't compete.
+          # A manual dispatch with privacy != public skips scheduling entirely.
+          YOUTUBE_PUBLISH_SLOT: "22:30"
           MEDIA_ROOT: ./media_output
           LOG_LEVEL: INFO
+          # Tracing is opt-in and self-arming: with no LANGSMITH_API_KEY secret set,
+          # this resolves to false and the run behaves exactly as before. Traces carry
+          # full prompts and scripts — keep the LangSmith project private.
+          LANGSMITH_TRACING: ${{ secrets.LANGSMITH_API_KEY != '' }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LANGSMITH_PROJECT: yt-automation
         run: |
           python scripts/run_daily.py \
             --count "${{ github.event.inputs.count || 2 }}" \
@@ -92,6 +115,21 @@ jobs:
             echo "no new stories to record"
           fi
 
+      - name: Upload rendered video for review
+        # A dry run renders the MP4 but never uploads it anywhere you can watch it.
+        # Attaching it to the run is how you eyeball captions and motion before
+        # anything reaches the channel.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-video
+          path: |
+            media_output/**/video/*.mp4
+            media_output/**/audio/*.srt
+            media_output/**/video/*.ass
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -99,3 +137,25 @@ jobs:
           name: logs
           path: logs/
           retention-days: 7
+
+      # Uploads publish public with no manual review step, so a failed run is otherwise
+      # completely silent: no video, no error, nothing until someone opens the Actions
+      # tab. Filing an issue reuses GitHub's own email/mobile notifications and needs no
+      # Slack or webhook secret. Repeat failures comment on the existing open issue
+      # rather than filing a new one every day; closing it resets that.
+      - name: Open an issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="${{ github.workflow }} failed"
+          body="Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          The scheduled run did not complete, so nothing was published. Logs are
+          attached to that run as an artifact."
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty') || true
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body" || echo "could not comment on issue #$existing"
+          else
+            gh issue create --title "$title" --body "$body" || echo "could not create issue — are Issues enabled on this repo?"
+          fi

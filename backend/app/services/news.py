@@ -21,6 +21,7 @@ from email.utils import parsedate_to_datetime
 import httpx
 
 from app.core.logging import logger
+from app.services.sensitive import is_safe
 
 _UA = "Mozilla/5.0 (compatible; yt-automation/0.1)"
 _ATOM = {"a": "http://www.w3.org/2005/Atom"}
@@ -52,15 +53,10 @@ _BLOCK = re.compile(
     re.IGNORECASE,
 )
 
-# Financial clickbait syndicated heavily through Google News. These are stock-promo
-# listicles, not AI news, and generating confident videos about them would put the
-# channel into financial-advice territory by accident.
-_STOCK_SPAM = re.compile(
-    r"\b(stocks?\s+to\s+buy|no-brainer|unstoppable|millionaire|"
-    r"best\s+ai\s+stocks?|should\s+you\s+buy|price\s+target|"
-    r"buy\s+now|skyrocket|soar|surge[sd]?\b|billionaires?\s+are\s+buying)\b",
-    re.IGNORECASE,
-)
+# Financial clickbait syndicated heavily through Google News, plus the medical and
+# legal equivalents. These are advice listicles, not AI news, and narrating them
+# would put the channel into YouTube's "AI persona on sensitive topics" bucket.
+# The patterns now live in services.sensitive so the trend feeds share them.
 _STOPWORDS = {
     "the", "a", "an", "of", "in", "on", "to", "for", "and", "or", "is", "was", "with",
     "by", "at", "from", "as", "it", "its", "this", "that", "new", "how", "why", "what",
@@ -139,7 +135,9 @@ def discover_ai_news(limit: int = 10, max_age_hours: int = 48) -> list[dict]:
             kept = 0
             for rank, (raw_title, link, published) in enumerate(entries[:40]):
                 title = _clean_title(raw_title, name)
-                if len(title) < 20 or _BLOCK.search(title) or _STOCK_SPAM.search(title):
+                # strict=False: tech journalism legitimately reports on funding rounds
+                # and medical AI, so only advice-shaped headlines are dropped here.
+                if len(title) < 20 or _BLOCK.search(title) or not is_safe(title):
                     continue
                 if published and published < cutoff:
                     continue
