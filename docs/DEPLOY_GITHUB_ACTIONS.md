@@ -3,6 +3,10 @@
 > ⚠️ **Superseded:** the current step-by-step guide is [SETUP.md](SETUP.md) — it covers the
 > newer dev-humor workflow, the weekly stats feedback loop and the `YOUTUBE_API_KEY` secret,
 > which this page predates. Kept for its extra background detail.
+>
+> Two things below are out of date: the cron triggers are now **commented out** in every
+> workflow (manual `workflow_dispatch` only), and the news schedule moved from 06:00 to
+> 21:00 UTC. See the schedule table in [SETUP.md](SETUP.md#going-automatic).
 
 Runs the whole pipeline on a schedule inside a GitHub runner:
 

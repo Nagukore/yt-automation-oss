@@ -141,7 +141,13 @@ Repo → **Actions** tab → enable workflows if prompted, then dry-run the pipe
 3. **Weekly Performance Stats** → **Run workflow**
    - ✅ Green run = your stats API key works.
 
-From now on everything is automatic:
+### Going automatic
+
+The five workflows ship with their `cron:` triggers **commented out**, so nothing runs unattended
+until you turn it on. Uncomment the `schedule:` key and its `- cron:` line in the workflow you
+want, and push it to your **default branch** — GitHub only reads cron from there.
+
+Once enabled, this is the cadence they're set to:
 
 | Workflow | Schedule (UTC) | Does |
 |---|---|---|
@@ -155,6 +161,9 @@ These UTC times are deliberately odd: they are set so that uploads land in US
 prime time, and staggered so two streams never render in the same runner slot.
 Retime them by editing the `cron:` line in the matching
 `.github/workflows/*.yml` — the value is **always UTC**, never your local time.
+
+Until you uncomment them, **Run workflow** in the Actions tab is the only way a run
+starts — which is the safe default while you're still testing secrets and quota.
 
 ---
 

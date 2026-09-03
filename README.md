@@ -7,9 +7,12 @@ video better.
 
 > Visibility: the library default is **private** (`YOUTUBE_UPLOAD_PRIVACY=private`), so a fresh
 > checkout can never publish by accident. The scheduled workflows in this repo deliberately
-> override it to **public** — the channel runs unattended, and for Shorts the cron is the publish
-> time. Set the `privacy` input on a `workflow_dispatch` run, or change the env in the workflow,
-> to put a human back in the loop.
+> override it to **public** — the channel runs unattended, and the upload carries a publish slot.
+> Set the `privacy` input on a `workflow_dispatch` run, or change the env in the workflow, to put
+> a human back in the loop.
+
+> **Schedules are paused.** Every `cron:` trigger under `.github/workflows/` is commented out, so
+> nothing in this repo runs on its own — see [CI mode](#1-ci-mode-zero-infrastructure--how-the-channel-actually-runs).
 
 ---
 
@@ -266,13 +269,59 @@ Two ways to run the same pipeline:
 
 GitHub Actions runs everything on a schedule. No server, no database to host, no cost.
 
-| Workflow | Runs at | Goes live at | What it does |
-|----------|---------|--------------|--------------|
+> ### ⏸ Schedules are currently paused
+>
+> Every `cron:` trigger in `.github/workflows/` is commented out, so **no workflow runs on its
+> own** — this repo is published as a reference, not as a live channel a fork would inherit.
+> `workflow_dispatch` is left active on all five, so **Actions → pick a workflow → Run workflow**
+> still works for a manual or `dry_run` run.
+>
+> The cadence below is what each cron is set to when enabled.
+> **[Turning automation back on](#turning-automation-back-on)** is two uncommented lines.
+
+| Workflow | Cron *(paused)* | Goes live at | What it does |
+|----------|-----------------|--------------|--------------|
 | `daily-video.yml` | 21:00 UTC daily | **22:30 + 22:45 UTC** | Discover AI news → generate → upload → record ledger |
 | `daily-humor.yml` | 23:00 UTC daily | **00:30 UTC** | Pick humor theme (engagement-weighted) → generate → upload → record ledger |
 | `daily-heartbreak.yml` | 00:30 UTC daily | **02:00 UTC** | Pick heartbreak theme (engagement-weighted) → generate → upload → record ledger |
 | `weekly-longform.yml` | Wed + Sat 17:50 UTC | **21:00 UTC** (ceiling) | Google Trends IN → 4-6 min 16:9 video → upload → record ledger |
 | `weekly-stats.yml` | Mondays 03:50 UTC | — | Fetch stats + country breakdown for every ledger video → commit `performance.json` + report |
+
+#### Turning automation back on
+
+Each workflow's `on:` block currently looks like this — the schedule commented out, manual
+dispatch left live:
+
+```yaml
+on:
+  # --- SCHEDULES PAUSED ---
+  # schedule:
+  #   - cron: "0 21 * * *"
+  workflow_dispatch:
+```
+
+To put a stream back on its schedule, drop the `#` from the `schedule:` key and its `- cron:`
+line (leave the explanatory comments alone — they document why that time was chosen):
+
+```yaml
+on:
+  schedule:
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+```
+
+Three things decide whether it actually fires:
+
+1. **It must be on the default branch.** GitHub reads `cron:` from `main` only — a schedule
+   enabled on a feature branch never runs.
+2. **Actions must be enabled for the repo**, and on a fresh fork the Actions tab asks you to
+   confirm before any workflow will run.
+3. **Secrets must be set** — an enabled cron with missing secrets is a red run every day, not a
+   silent no-op. See [SETUP.md](docs/SETUP.md) for the list.
+
+One more thing worth knowing on a public repo: **GitHub disables scheduled workflows after 60
+days with no commits.** An active repo resets that counter on its own; a finished one goes quiet
+and needs a commit to wake back up.
 
 **The cron is not the publish time — `YOUTUBE_PUBLISH_SLOT` is.** Uploads go up private with
 `status.publishAt`, and YouTube flips them public itself at the exact minute in the table above.
