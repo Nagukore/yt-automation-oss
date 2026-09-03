@@ -1,20 +1,25 @@
 name: Daily AI News Video
 
 on:
-  schedule:
-    # 21:00 UTC starts the run; YOUTUBE_PUBLISH_SLOT below decides when the videos
-    # actually go live, so this only needs to be far enough ahead to finish.
-    #
-    # The old comment here claimed the cron WAS the publish time. Measured over
-    # 2026-08-05..19 it was not: the median news Short went live at 13:37 UTC off a
-    # 12:50 cron, and heartbreak drifted +2h39m. The `:50` trick did not buy the
-    # delay back. Uploads now carry status.publishAt, so GitHub can queue this run
-    # whenever it likes and the video still surfaces at the same minute every day.
-    #
-    # Timing rationale: 12:50 UTC put the two daily news Shorts — half of all
-    # output — at 19:07 IST, squarely in Indian prime time, and 09:37 ET, a dead
-    # US slot. The 22:30 slot is 18:30 ET / 15:30 PT instead.
-    - cron: "0 21 * * *"
+  # --- SCHEDULES PAUSED ---------------------------------------------------
+  # Cron triggers are commented out while this repo is public and idle, so no
+  # scheduled runs burn Actions minutes or API quota. `workflow_dispatch`
+  # below is left active: it only fires when someone clicks Run workflow.
+  # To resume, uncomment the `schedule:` key and its `- cron:` line.
+  # schedule:
+  #   # 21:00 UTC starts the run; YOUTUBE_PUBLISH_SLOT below decides when the videos
+  #   # actually go live, so this only needs to be far enough ahead to finish.
+  #   #
+  #   # The old comment here claimed the cron WAS the publish time. Measured over
+  #   # 2026-08-05..19 it was not: the median news Short went live at 13:37 UTC off a
+  #   # 12:50 cron, and heartbreak drifted +2h39m. The `:50` trick did not buy the
+  #   # delay back. Uploads now carry status.publishAt, so GitHub can queue this run
+  #   # whenever it likes and the video still surfaces at the same minute every day.
+  #   #
+  #   # Timing rationale: 12:50 UTC put the two daily news Shorts — half of all
+  #   # output — at 19:07 IST, squarely in Indian prime time, and 09:37 ET, a dead
+  #   # US slot. The 22:30 slot is 18:30 ET / 15:30 PT instead.
+  #   - cron: "0 21 * * *"
   workflow_dispatch:          # lets you trigger a run manually from the Actions tab
     inputs:
       count:

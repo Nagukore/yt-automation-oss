@@ -9,11 +9,16 @@ name: Weekly Performance Stats
 # No OAuth — public statistics only.
 
 on:
-  schedule:
-    # Monday 03:50 UTC, before the day's uploads, so the week starts with
-    # fresh weights.
-    # The :50 buys back the queue delay GitHub adds on the hour — see daily-video.yml.
-    - cron: "50 3 * * 1"
+  # --- SCHEDULES PAUSED ---------------------------------------------------
+  # Cron triggers are commented out while this repo is public and idle, so no
+  # scheduled runs burn Actions minutes or API quota. `workflow_dispatch`
+  # below is left active: it only fires when someone clicks Run workflow.
+  # To resume, uncomment the `schedule:` key and its `- cron:` line.
+  # schedule:
+  #   # Monday 03:50 UTC, before the day's uploads, so the week starts with
+  #   # fresh weights.
+  #   # The :50 buys back the queue delay GitHub adds on the hour — see daily-video.yml.
+  #   - cron: "50 3 * * 1"
   workflow_dispatch:
 
 concurrency:

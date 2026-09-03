@@ -5,16 +5,21 @@ name: Daily Code Heartbreak Video
 # (state/seen_code_heartbreak.json). Shares secrets and the YouTube channel.
 
 on:
-  schedule:
-    # 00:30 UTC starts the run; YOUTUBE_PUBLISH_SLOT decides when it goes live
-    # (02:00 UTC = 22:00 ET / 19:00 PT, previous calendar day in the US). Late
-    # evening is when sad-quote reels actually land.
-    # This stream had the worst drift of all under the old scheme: a 00:50 cron was
-    # publishing at 03:29 UTC median, +2h39m. See daily-video.yml.
-    # Total is still 4 uploads/day (2 news + 1 humor + 1 heartbreak) against the
-    # ~6/day YouTube quota, and the run stays clear of the 21:00 news and 23:00
-    # humor jobs.
-    - cron: "30 0 * * *"
+  # --- SCHEDULES PAUSED ---------------------------------------------------
+  # Cron triggers are commented out while this repo is public and idle, so no
+  # scheduled runs burn Actions minutes or API quota. `workflow_dispatch`
+  # below is left active: it only fires when someone clicks Run workflow.
+  # To resume, uncomment the `schedule:` key and its `- cron:` line.
+  # schedule:
+  #   # 00:30 UTC starts the run; YOUTUBE_PUBLISH_SLOT decides when it goes live
+  #   # (02:00 UTC = 22:00 ET / 19:00 PT, previous calendar day in the US). Late
+  #   # evening is when sad-quote reels actually land.
+  #   # This stream had the worst drift of all under the old scheme: a 00:50 cron was
+  #   # publishing at 03:29 UTC median, +2h39m. See daily-video.yml.
+  #   # Total is still 4 uploads/day (2 news + 1 humor + 1 heartbreak) against the
+  #   # ~6/day YouTube quota, and the run stays clear of the 21:00 news and 23:00
+  #   # humor jobs.
+  #   - cron: "30 0 * * *"
   workflow_dispatch:
     inputs:
       count:

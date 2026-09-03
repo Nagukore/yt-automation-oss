@@ -5,14 +5,19 @@ name: Daily Dev Humor Video
 # Shares the same secrets and YouTube channel unless you point it at another one.
 
 on:
-  schedule:
-    # 23:00 UTC starts the run; YOUTUBE_PUBLISH_SLOT decides when it goes live
-    # (00:30 UTC the next day = 20:30 ET / 17:30 PT, the evening scroll window when
-    # relatable comedy gets watched and shared). See daily-video.yml for why the
-    # cron is no longer the publish time.
-    # Offset from the 21:00 news run and the 00:30 heartbreak run so uploads never
-    # collide against the ~6/day YouTube quota.
-    - cron: "0 23 * * *"
+  # --- SCHEDULES PAUSED ---------------------------------------------------
+  # Cron triggers are commented out while this repo is public and idle, so no
+  # scheduled runs burn Actions minutes or API quota. `workflow_dispatch`
+  # below is left active: it only fires when someone clicks Run workflow.
+  # To resume, uncomment the `schedule:` key and its `- cron:` line.
+  # schedule:
+  #   # 23:00 UTC starts the run; YOUTUBE_PUBLISH_SLOT decides when it goes live
+  #   # (00:30 UTC the next day = 20:30 ET / 17:30 PT, the evening scroll window when
+  #   # relatable comedy gets watched and shared). See daily-video.yml for why the
+  #   # cron is no longer the publish time.
+  #   # Offset from the 21:00 news run and the 00:30 heartbreak run so uploads never
+  #   # collide against the ~6/day YouTube quota.
+  #   - cron: "0 23 * * *"
   workflow_dispatch:
     inputs:
       count:

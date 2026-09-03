@@ -14,16 +14,21 @@ name: Weekly Long-Form Video
 # cover the same story twice.
 
 on:
-  schedule:
-    # Wed + Sat 17:50 UTC. Unlike the Shorts workflows the cron is NOT the publish
-    # time here: the upload runs at the END of the job, and a long-form render takes
-    # roughly 1-3 hours (16 images generated serially, then a 6-minute 1080p encode).
-    # So 17:50 UTC lands the actual publish around 19:00-21:00 UTC = 15:00-17:00 US
-    # Eastern, heading into the evening when long-form gets watched.
-    # Re-time this if the render duration changes materially.
-    # The :50 buys back the queue delay GitHub adds on the hour — see daily-video.yml.
-    # It matters least here, since the render time dominates the publish slot anyway.
-    - cron: "50 17 * * 3,6"
+  # --- SCHEDULES PAUSED ---------------------------------------------------
+  # Cron triggers are commented out while this repo is public and idle, so no
+  # scheduled runs burn Actions minutes or API quota. `workflow_dispatch`
+  # below is left active: it only fires when someone clicks Run workflow.
+  # To resume, uncomment the `schedule:` key and its `- cron:` line.
+  # schedule:
+  #   # Wed + Sat 17:50 UTC. Unlike the Shorts workflows the cron is NOT the publish
+  #   # time here: the upload runs at the END of the job, and a long-form render takes
+  #   # roughly 1-3 hours (16 images generated serially, then a 6-minute 1080p encode).
+  #   # So 17:50 UTC lands the actual publish around 19:00-21:00 UTC = 15:00-17:00 US
+  #   # Eastern, heading into the evening when long-form gets watched.
+  #   # Re-time this if the render duration changes materially.
+  #   # The :50 buys back the queue delay GitHub adds on the hour — see daily-video.yml.
+  #   # It matters least here, since the render time dominates the publish slot anyway.
+  #   - cron: "50 17 * * 3,6"
   workflow_dispatch:
     inputs:
       count:
